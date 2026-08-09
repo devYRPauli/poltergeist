@@ -283,6 +283,7 @@ export const registerProjectCommands = (program: Command): void => {
         const daysThreshold = Number.parseInt(options.days, 10);
         const ageThreshold = Date.now() - daysThreshold * msPerDay;
         const stateDir = FileSystemUtils.getStateDirectory();
+        const logger = createLogger();
         let removedCount = 0;
         let candidateCount = 0;
         const jsonReport: Array<Record<string, unknown>> = [];
@@ -394,7 +395,8 @@ export const registerProjectCommands = (program: Command): void => {
               removedCount++;
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                throw error;
+                const detail = error instanceof Error ? error.message : String(error);
+                logger.error(`Failed to remove state file ${file}: ${detail}`);
               }
             }
           }

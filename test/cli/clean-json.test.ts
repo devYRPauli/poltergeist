@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -113,6 +113,41 @@ describe("clean --json", () => {
     // The second file must still be cleaned rather than the pass aborting.
     expect(existsSync(join(stateDir, "zzz-5678efab-app.state"))).toBe(false);
     expect(readdirSync(stateDir)).toHaveLength(0);
+  });
+
+  it("reports an unlink failure and keeps cleaning later files", async () => {
+    const blockedPath = join(stateDir, "aaa-1234abcd-app.state");
+    const laterPath = join(stateDir, "zzz-5678efab-app.state");
+    writeState("aaa-1234abcd-app.state", "aaa", "/tmp/aaa");
+    writeState("zzz-5678efab-app.state", "zzz", "/tmp/zzz");
+
+    const program = new Command();
+    registerProjectCommands(program);
+    let loggedRemovalError = false;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      loggedRemovalError ||= String(args[0] ?? "").includes(
+        "Failed to remove state file aaa-1234abcd-app.state",
+      );
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      const line = String(args[0] ?? "");
+      if (line.includes("Removing:") && line.includes("aaa-1234abcd-app.state")) {
+        rmSync(blockedPath, { force: true });
+        mkdirSync(blockedPath);
+        writeFileSync(join(blockedPath, "still-in-use"), "blocked");
+      }
+    });
+
+    try {
+      await program.parseAsync(["clean", "--all", "--json"], { from: "user" });
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+
+    expect(existsSync(blockedPath)).toBe(true);
+    expect(existsSync(laterPath)).toBe(false);
+    expect(loggedRemovalError).toBe(true);
   });
 
   it("reports each file under its own project name", async () => {
