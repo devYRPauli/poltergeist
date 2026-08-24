@@ -12,17 +12,28 @@ export class ExecutableRunner {
   private child: ChildProcess | null = null;
   private pendingRestart = false;
   private restartTimer: NodeJS.Timeout | null = null;
-  private readonly restartSignal: NodeJS.Signals;
-  private readonly restartDelay: number;
-  private readonly args: string[];
-  private readonly env?: Record<string, string>;
-  private readonly customCommand?: string;
+  private restartSignal: NodeJS.Signals;
+  private restartDelay: number;
+  private args: string[];
+  private env?: Record<string, string>;
+  private customCommand?: string;
   private shuttingDown = false;
 
   constructor(
-    private readonly target: ExecutableTarget,
+    private target: ExecutableTarget,
     private readonly options: ExecutableRunnerOptions,
   ) {
+    const cfg = target.autoRun ?? {};
+    const restartSignal = cfg.restartSignal as NodeJS.Signals | undefined;
+    this.restartSignal = restartSignal ?? "SIGINT";
+    this.restartDelay = Math.max(0, cfg.restartDelayMs ?? 250);
+    this.args = Array.isArray(cfg.args) ? cfg.args : [];
+    this.env = cfg.env;
+    this.customCommand = cfg.command;
+  }
+
+  public updateTarget(target: ExecutableTarget): void {
+    this.target = target;
     const cfg = target.autoRun ?? {};
     const restartSignal = cfg.restartSignal as NodeJS.Signals | undefined;
     this.restartSignal = restartSignal ?? "SIGINT";

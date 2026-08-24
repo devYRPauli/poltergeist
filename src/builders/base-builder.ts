@@ -56,6 +56,10 @@ export abstract class BaseBuilder<T extends Target = Target> {
     return this.projectRoot;
   }
 
+  public updateTarget(target: T): void {
+    this.target = target;
+  }
+
   public async build(changedFiles: string[], options: BuildOptions = {}): Promise<BuildStatus> {
     // Format file list for logging
     const fileListText = this.formatChangedFiles(changedFiles);

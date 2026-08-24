@@ -257,6 +257,67 @@ describe("Configuration Reloading", () => {
       );
     });
 
+    test("should use the modified build command after applying target changes", async () => {
+      const configPath = "/test/poltergeist.config.json";
+      const enhancedMocks = {
+        ...harness.mocks,
+        watchmanConfigManager: {
+          ensureConfigUpToDate: vi.fn().mockResolvedValue(undefined),
+          suggestOptimizations: vi.fn().mockResolvedValue([]),
+          normalizeWatchPattern: vi.fn().mockImplementation((pattern: string) => pattern),
+          validateWatchPattern: vi.fn(),
+          createExclusionExpressions: vi.fn().mockReturnValue([]),
+        },
+      };
+      let builderTarget = baseConfig.targets[0];
+      const executedCommands: Array<string | undefined> = [];
+      const builder = {
+        build: vi.fn().mockImplementation(async () => {
+          executedCommands.push(builderTarget.buildCommand);
+          return {
+            status: "success" as const,
+            targetName: builderTarget.name,
+            timestamp: new Date().toISOString(),
+          };
+        }),
+        updateTarget: vi.fn().mockImplementation((target: PoltergeistConfig["targets"][number]) => {
+          builderTarget = target;
+        }),
+        validate: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn(),
+        getOutputInfo: vi.fn(),
+        getProjectRoot: vi.fn().mockReturnValue("/test/project"),
+        describeBuilder: vi.fn().mockReturnValue("Executable"),
+      };
+      enhancedMocks.builderFactory.createBuilder = vi.fn().mockReturnValue(builder);
+
+      const poltergeist = new (await import("../src/poltergeist.js")).Poltergeist(
+        baseConfig,
+        "/test/project",
+        harness.logger,
+        enhancedMocks,
+        configPath,
+      );
+      await poltergeist.start(undefined, { waitForInitialBuilds: false });
+
+      const newConfig: PoltergeistConfig = {
+        ...baseConfig,
+        targets: [
+          {
+            ...baseConfig.targets[0],
+            buildCommand: "npm run build:modified",
+          },
+        ],
+      };
+      const changes = detectConfigChanges(baseConfig, newConfig);
+
+      expect(changes.targetsModified).toHaveLength(1);
+      await poltergeist.applyConfigChanges(newConfig, changes);
+      await builder.build([]);
+
+      expect(executedCommands).toEqual(["npm run build:modified"]);
+    });
+
     test("should properly handle target removal", async () => {
       const configPath = "/test/poltergeist.config.json";
       const enhancedMocks = {
