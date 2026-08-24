@@ -44,6 +44,8 @@ export abstract class BaseBuilder<T extends Target = Target> {
   protected logger: Logger;
   protected stateManager: StateManager;
   protected currentProcess?: ChildProcess;
+  private activeBuilds = 0;
+  private pendingTarget?: T;
 
   constructor(target: T, projectRoot: string, logger: Logger, stateManager: StateManager) {
     this.target = target;
@@ -57,10 +59,30 @@ export abstract class BaseBuilder<T extends Target = Target> {
   }
 
   public updateTarget(target: T): void {
+    if (this.activeBuilds > 0) {
+      this.pendingTarget = target;
+      return;
+    }
     this.target = target;
   }
 
   public async build(changedFiles: string[], options: BuildOptions = {}): Promise<BuildStatus> {
+    this.activeBuilds += 1;
+    try {
+      return await this.buildWithCurrentTarget(changedFiles, options);
+    } finally {
+      this.activeBuilds -= 1;
+      if (this.activeBuilds === 0 && this.pendingTarget) {
+        this.target = this.pendingTarget;
+        this.pendingTarget = undefined;
+      }
+    }
+  }
+
+  private async buildWithCurrentTarget(
+    changedFiles: string[],
+    options: BuildOptions,
+  ): Promise<BuildStatus> {
     // Format file list for logging
     const fileListText = this.formatChangedFiles(changedFiles);
     this.logger.info(

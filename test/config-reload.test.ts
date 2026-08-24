@@ -1,9 +1,27 @@
 // Configuration reloading tests
 
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { EventEmitter } from "events";
+import { tmpdir } from "os";
+import { join } from "path";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { ExecutableBuilder } from "../src/builders/executable-builder.js";
 import { createTestHarness } from "../src/factories.js";
-import type { PoltergeistConfig } from "../src/types.js";
+import { ExecutableRunner } from "../src/runners/executable-runner.js";
+import type { StateManager } from "../src/state.js";
+import type { ExecutableTarget, PoltergeistConfig } from "../src/types.js";
 import { detectConfigChanges } from "../src/utils/config-diff.js";
+
+vi.mock("child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("child_process")>();
+  return {
+    ...actual,
+    execSync: vi.fn().mockReturnValue("abc123\n"),
+    spawn: vi.fn(),
+  };
+});
+
+const { spawn } = await import("child_process");
 
 describe("Configuration Reloading", () => {
   const baseConfig: PoltergeistConfig = {
@@ -316,6 +334,119 @@ describe("Configuration Reloading", () => {
       await builder.build([]);
 
       expect(executedCommands).toEqual(["npm run build:modified"]);
+    });
+
+    test("should keep the in-flight build target stable during target updates", async () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), "poltergeist-config-reload-"));
+      const oldTarget: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-old",
+        outputPath: "./dist/old-app",
+        watchPaths: ["src/**/*.ts"],
+      };
+      const newTarget: ExecutableTarget = {
+        ...oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+      };
+      const updateAppInfo = vi.fn().mockResolvedValue(undefined);
+      const stateManager = {
+        ...harness.mocks.stateManager,
+        updateAppInfo,
+      } as unknown as StateManager;
+      let releaseBuild: (() => void) | undefined;
+
+      class InFlightBuilder extends ExecutableBuilder {
+        protected override async executeBuild(): Promise<void> {
+          await new Promise<void>((resolve) => {
+            releaseBuild = resolve;
+          });
+        }
+      }
+
+      mkdirSync(join(projectRoot, "dist"), { recursive: true });
+      writeFileSync(join(projectRoot, oldTarget.outputPath), "old output");
+      const builder = new InFlightBuilder(oldTarget, projectRoot, harness.logger, stateManager);
+
+      try {
+        const buildPromise = builder.build([]);
+        await vi.waitFor(() => expect(releaseBuild).toBeDefined());
+
+        builder.updateTarget(newTarget);
+        releaseBuild?.();
+
+        const result = await buildPromise;
+        expect(result.status).toBe("success");
+        expect(updateAppInfo).toHaveBeenCalledWith("test-target", {
+          outputPath: join(projectRoot, oldTarget.outputPath),
+        });
+        expect(builder.getOutputInfo()).toBe(join(projectRoot, newTarget.outputPath));
+      } finally {
+        releaseBuild?.();
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test("should stop auto-run on disable and allow it to be re-enabled", async () => {
+      vi.useFakeTimers();
+      const killMocks: Array<ReturnType<typeof vi.fn>> = [];
+
+      (spawn as vi.Mock).mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          kill: vi.fn((signal: NodeJS.Signals) => {
+            child.emit("exit", 0, signal);
+            return true;
+          }),
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+        });
+        killMocks.push(child.kill);
+        return child;
+      });
+
+      const target: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-app",
+        outputPath: "./dist/app",
+        watchPaths: ["src/**/*.ts"],
+        autoRun: {
+          enabled: true,
+          command: "run-app",
+          restartDelayMs: 1000,
+        },
+      };
+      const runner = new ExecutableRunner(target, {
+        projectRoot: "/test/project",
+        logger: harness.logger,
+      });
+
+      try {
+        await runner.onBuildSuccess();
+        await runner.onBuildSuccess();
+        expect(spawn).toHaveBeenCalledTimes(1);
+
+        await runner.updateTarget({
+          ...target,
+          autoRun: { ...target.autoRun, enabled: false },
+        });
+
+        expect(killMocks[0]).toHaveBeenCalledWith("SIGTERM");
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(spawn).toHaveBeenCalledTimes(1);
+
+        await runner.updateTarget(target);
+        await runner.onBuildSuccess();
+
+        expect(spawn).toHaveBeenCalledTimes(2);
+      } finally {
+        await runner.stop();
+        vi.useRealTimers();
+      }
     });
 
     test("should properly handle target removal", async () => {

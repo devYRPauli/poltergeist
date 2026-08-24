@@ -32,7 +32,8 @@ export class ExecutableRunner {
     this.customCommand = cfg.command;
   }
 
-  public updateTarget(target: ExecutableTarget): void {
+  public async updateTarget(target: ExecutableTarget): Promise<void> {
+    const shouldStop = this.target.autoRun?.enabled === true && !target.autoRun?.enabled;
     this.target = target;
     const cfg = target.autoRun ?? {};
     const restartSignal = cfg.restartSignal as NodeJS.Signals | undefined;
@@ -41,6 +42,15 @@ export class ExecutableRunner {
     this.args = Array.isArray(cfg.args) ? cfg.args : [];
     this.env = cfg.env;
     this.customCommand = cfg.command;
+
+    if (shouldStop) {
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = null;
+      }
+      this.pendingRestart = false;
+      await this.stopChild("SIGTERM");
+    }
   }
 
   public async onBuildSuccess(): Promise<void> {
