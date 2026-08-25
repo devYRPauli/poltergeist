@@ -301,6 +301,7 @@ describe("Configuration Reloading", () => {
         updateTarget: vi.fn().mockImplementation((target: PoltergeistConfig["targets"][number]) => {
           builderTarget = target;
         }),
+        hasActiveBuild: vi.fn().mockReturnValue(false),
         validate: vi.fn().mockResolvedValue(undefined),
         stop: vi.fn(),
         getOutputInfo: vi.fn(),
@@ -386,6 +387,193 @@ describe("Configuration Reloading", () => {
       } finally {
         releaseBuild?.();
         rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    async function createAutoRunReloadHarness(blockFirstBuild: boolean) {
+      const oldTarget: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-old",
+        outputPath: "./dist/old-app",
+        watchPaths: ["src/**/*.ts"],
+        autoRun: {
+          enabled: true,
+          command: "run-old",
+          args: ["--old"],
+          restartDelayMs: 1,
+        },
+      };
+      const oldConfig: PoltergeistConfig = { ...baseConfig, targets: [oldTarget] };
+      const stateManager = {
+        ...harness.mocks.stateManager,
+        updateAppInfo: vi.fn().mockResolvedValue(undefined),
+      } as unknown as StateManager;
+      let releaseBuild: (() => void) | undefined;
+      let buildCount = 0;
+
+      class InFlightBuilder extends ExecutableBuilder {
+        protected override async executeBuild(): Promise<void> {
+          buildCount += 1;
+          if (blockFirstBuild && buildCount === 1) {
+            await new Promise<void>((resolve) => {
+              releaseBuild = resolve;
+            });
+          }
+        }
+
+        protected override async postBuild(): Promise<void> {}
+      }
+
+      const killMock = vi.fn();
+      (spawn as vi.Mock).mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          kill: killMock.mockImplementation((signal: NodeJS.Signals) => {
+            child.emit("exit", 0, signal);
+            return true;
+          }),
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+        });
+        return child;
+      });
+
+      const builder = new InFlightBuilder(oldTarget, "/test/project", harness.logger, stateManager);
+      const enhancedMocks = {
+        ...harness.mocks,
+        stateManager,
+        builderFactory: {
+          createBuilder: vi.fn().mockReturnValue(builder),
+        },
+        watchmanConfigManager: {
+          ensureConfigUpToDate: vi.fn().mockResolvedValue(undefined),
+          suggestOptimizations: vi.fn().mockResolvedValue([]),
+          normalizeWatchPattern: vi.fn().mockImplementation((pattern: string) => pattern),
+          validateWatchPattern: vi.fn(),
+          createExclusionExpressions: vi.fn().mockReturnValue([]),
+        },
+      };
+      const poltergeist = new (await import("../src/poltergeist.js")).Poltergeist(
+        oldConfig,
+        "/test/project",
+        harness.logger,
+        enhancedMocks,
+        "/test/poltergeist.config.json",
+      );
+      await poltergeist.start(undefined, { waitForInitialBuilds: false });
+      const runner = (
+        poltergeist as unknown as {
+          targetStates: Map<string, { runner?: ExecutableRunner }>;
+        }
+      ).targetStates.get(oldTarget.name)?.runner;
+      if (!runner) {
+        throw new Error("Expected executable runner");
+      }
+
+      return {
+        oldTarget,
+        poltergeist,
+        runner,
+        killMock,
+        releaseBuild: () => releaseBuild?.(),
+        waitForBuildStart: () => vi.waitFor(() => expect(releaseBuild).toBeDefined()),
+        applyTarget: async (target: ExecutableTarget) => {
+          const newConfig: PoltergeistConfig = { ...oldConfig, targets: [target] };
+          await poltergeist.applyConfigChanges(
+            newConfig,
+            detectConfigChanges(oldConfig, newConfig),
+          );
+        },
+      };
+    }
+
+    test("should launch an in-flight build with the old auto-run command and later builds with the new command", async () => {
+      const setup = await createAutoRunReloadHarness(true);
+      const newTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+
+      try {
+        await setup.runner.onBuildSuccess();
+        (spawn as vi.Mock).mockClear();
+
+        const buildPromise = setup.poltergeist.performInitialBuilds();
+        await setup.waitForBuildStart();
+        await setup.applyTarget(newTarget);
+        setup.releaseBuild();
+        await buildPromise;
+
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+        });
+
+        (spawn as vi.Mock).mockClear();
+        await setup.poltergeist.performInitialBuilds();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+        });
+      } finally {
+        setup.releaseBuild();
+        await setup.poltergeist.stop();
+      }
+    });
+
+    test("should stop auto-run immediately when disabled during an in-flight build", async () => {
+      const setup = await createAutoRunReloadHarness(true);
+      const disabledTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        autoRun: { ...setup.oldTarget.autoRun, enabled: false },
+      };
+
+      try {
+        await setup.runner.onBuildSuccess();
+        expect(spawn).toHaveBeenCalledTimes(1);
+
+        const buildPromise = setup.poltergeist.performInitialBuilds();
+        await setup.waitForBuildStart();
+        await setup.applyTarget(disabledTarget);
+
+        expect(setup.killMock).toHaveBeenCalledWith("SIGTERM");
+        (spawn as vi.Mock).mockClear();
+        setup.releaseBuild();
+        await buildPromise;
+
+        expect(spawn).not.toHaveBeenCalled();
+      } finally {
+        setup.releaseBuild();
+        await setup.poltergeist.stop();
+      }
+    });
+
+    test("should apply auto-run target updates immediately when no build is in flight", async () => {
+      const setup = await createAutoRunReloadHarness(false);
+      const newTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+
+      try {
+        await setup.applyTarget(newTarget);
+        await setup.runner.onBuildSuccess();
+
+        expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+      } finally {
+        await setup.poltergeist.stop();
       }
     });
 

@@ -66,6 +66,10 @@ export abstract class BaseBuilder<T extends Target = Target> {
     this.target = target;
   }
 
+  public hasActiveBuild(): boolean {
+    return this.activeBuilds > 0;
+  }
+
   public async build(changedFiles: string[], options: BuildOptions = {}): Promise<BuildStatus> {
     this.activeBuilds += 1;
     try {
