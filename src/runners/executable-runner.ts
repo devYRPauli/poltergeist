@@ -79,6 +79,10 @@ export class ExecutableRunner {
 
   public async onBuildSuccess(): Promise<void> {
     if (!this.target.autoRun?.enabled) {
+      // No launch happens for this build, so nothing downstream reaches the
+      // adoption in launch(). Take the pending target here or a disabled to
+      // enabled reload is stranded and the target never auto-runs again.
+      this.adoptPendingTarget();
       return;
     }
     if (!this.child) {

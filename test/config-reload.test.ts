@@ -527,6 +527,45 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should enable auto-run after a disabled in-flight build finishes", async () => {
+      const setup = await createAutoRunReloadHarness(true);
+      const disabledTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        autoRun: { ...setup.oldTarget.autoRun, enabled: false },
+      };
+      const enabledTarget: ExecutableTarget = {
+        ...disabledTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...disabledTarget.autoRun,
+          enabled: true,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+
+      try {
+        await setup.applyTarget(disabledTarget);
+
+        const buildPromise = setup.poltergeist.performInitialBuilds();
+        await setup.waitForBuildStart();
+        await setup.applyTarget(enabledTarget);
+        setup.releaseBuild();
+        await buildPromise;
+
+        expect(spawn).not.toHaveBeenCalled();
+
+        await setup.poltergeist.performInitialBuilds();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+        });
+      } finally {
+        setup.releaseBuild();
+        await setup.poltergeist.stop();
+      }
+    });
+
     test("should stop auto-run immediately when disabled during an in-flight build", async () => {
       const setup = await createAutoRunReloadHarness(true);
       const disabledTarget: ExecutableTarget = {
