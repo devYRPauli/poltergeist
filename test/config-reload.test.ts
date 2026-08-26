@@ -527,6 +527,81 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should keep the newest deferred target when reloaded during a restart", async () => {
+      const setup = await createAutoRunReloadHarness(true);
+      const firstTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-first",
+        outputPath: "./dist/first-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-first",
+          args: ["--first"],
+        },
+      };
+      const secondTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-second",
+        outputPath: "./dist/second-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-second",
+          args: ["--second"],
+        },
+      };
+      let releaseRestart: (() => void) | undefined;
+      let holdFirstStop = true;
+
+      (spawn as vi.Mock).mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          kill: vi.fn((signal: NodeJS.Signals) => {
+            if (holdFirstStop) {
+              holdFirstStop = false;
+              releaseRestart = () => child.emit("exit", 0, signal);
+            } else {
+              child.emit("exit", 0, signal);
+            }
+            return true;
+          }),
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+        });
+        return child;
+      });
+
+      try {
+        await setup.runner.onBuildSuccess();
+        (spawn as vi.Mock).mockClear();
+
+        const buildPromise = setup.poltergeist.performInitialBuilds();
+        await setup.waitForBuildStart();
+        await setup.applyTarget(firstTarget);
+        setup.releaseBuild();
+        await buildPromise;
+        await vi.waitFor(() => expect(releaseRestart).toBeDefined());
+
+        await setup.applyTarget(secondTarget);
+        releaseRestart?.();
+
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(1);
+          expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+        });
+
+        (spawn as vi.Mock).mockClear();
+        await setup.poltergeist.performInitialBuilds();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(1);
+          expect(spawn).toHaveBeenLastCalledWith("run-second", ["--second"], expect.any(Object));
+        });
+      } finally {
+        setup.releaseBuild();
+        releaseRestart?.();
+        await setup.poltergeist.stop();
+      }
+    });
+
     test("should keep the old auto-run command until every in-flight build finishes", async () => {
       const setup = await createAutoRunReloadHarness(false);
       const newTarget: ExecutableTarget = {

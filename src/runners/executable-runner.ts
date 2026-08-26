@@ -54,9 +54,11 @@ export class ExecutableRunner {
       await this.stopChild("SIGTERM");
       return;
     }
-    if (options.defer) {
-      // A build is in flight. Its artifact belongs to the old target, so keep the old
-      // launch settings until that build has been handled.
+    if (options.defer || this.pendingTarget) {
+      // A build is in flight, OR an earlier reload is still waiting to be adopted - for
+      // example a restart is between stopChild() and launch(). Either way the runner is
+      // mid-deferral and the artifact still belongs to the old target, so keep the old
+      // launch settings and let the newest target replace whatever is pending.
       this.pendingTarget = target;
       return;
     }
