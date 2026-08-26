@@ -12,6 +12,7 @@ export class ExecutableRunner {
   private child: ChildProcess | null = null;
   private pendingRestart = false;
   private pendingTarget?: ExecutableTarget;
+  private isBuildActive?: () => boolean;
   private restartTimer: NodeJS.Timeout | null = null;
   private restartSignal: NodeJS.Signals;
   private restartDelay: number;
@@ -35,8 +36,11 @@ export class ExecutableRunner {
 
   public async updateTarget(
     target: ExecutableTarget,
-    options: { defer?: boolean } = {},
+    options: { defer?: boolean; isBuildActive?: () => boolean } = {},
   ): Promise<void> {
+    if (options.isBuildActive) {
+      this.isBuildActive = options.isBuildActive;
+    }
     const shouldStop = this.target.autoRun?.enabled === true && !target.autoRun?.enabled;
     if (shouldStop) {
       // Turning auto-run off applies at once, so a queued restart cannot revive the child.
@@ -72,6 +76,11 @@ export class ExecutableRunner {
 
   private adoptPendingTarget(): void {
     if (!this.pendingTarget) return;
+    // A later build for the same target can still be running. BaseBuilder counts its
+    // builds and only adopts at zero; match that. Adopting after the first completion
+    // lets the second old-target build finish under the new command, arguments,
+    // environment or output path - the defect this deferral exists to prevent.
+    if (this.isBuildActive?.()) return;
     const target = this.pendingTarget;
     this.pendingTarget = undefined;
     this.applyTarget(target);

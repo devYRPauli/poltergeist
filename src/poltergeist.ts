@@ -807,6 +807,7 @@ export class Poltergeist {
       previous?.builder.updateTarget(mod.newTarget);
       await previous?.runner?.updateTarget(mod.newTarget as ExecutableTarget, {
         defer: previous?.builder?.hasActiveBuild() ?? false,
+        isBuildActive: () => previous?.builder?.hasActiveBuild() ?? false,
       });
       const builder = previous?.builder
         ? previous.builder

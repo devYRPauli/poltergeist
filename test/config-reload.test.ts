@@ -527,6 +527,55 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should keep the old auto-run command until every in-flight build finishes", async () => {
+      const setup = await createAutoRunReloadHarness(false);
+      const newTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+      let activeBuilds = 0;
+      const startBuild = () => {
+        activeBuilds += 1;
+      };
+      const finishBuild = async () => {
+        activeBuilds -= 1;
+        await setup.runner.onBuildSuccess();
+      };
+
+      try {
+        startBuild();
+        startBuild();
+        await setup.runner.updateTarget(newTarget, {
+          defer: true,
+          isBuildActive: () => activeBuilds > 0,
+        });
+
+        await finishBuild();
+        expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+
+        await finishBuild();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(2);
+          expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+        });
+
+        startBuild();
+        await finishBuild();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(3);
+          expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+        });
+      } finally {
+        await setup.poltergeist.stop();
+      }
+    });
+
     test("should enable auto-run after a disabled in-flight build finishes", async () => {
       const setup = await createAutoRunReloadHarness(true);
       const disabledTarget: ExecutableTarget = {
