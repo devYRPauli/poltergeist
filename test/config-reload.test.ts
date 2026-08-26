@@ -678,6 +678,43 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should keep a queued restart on the old target when a reload lands before it fires", async () => {
+      vi.useFakeTimers();
+      const setup = await createAutoRunReloadHarness(false);
+      const newTarget: ExecutableTarget = {
+        ...setup.oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...setup.oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+
+      try {
+        await setup.runner.onBuildSuccess();
+        (spawn as vi.Mock).mockClear();
+
+        await setup.poltergeist.performInitialBuilds();
+        await setup.applyTarget(newTarget);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+
+        (spawn as vi.Mock).mockClear();
+        await setup.poltergeist.performInitialBuilds();
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+      } finally {
+        await setup.poltergeist.stop();
+        vi.useRealTimers();
+      }
+    });
+
     test("should adopt a deferred target after an executing restart finishes", async () => {
       const oldTarget: ExecutableTarget = {
         name: "test-target",
