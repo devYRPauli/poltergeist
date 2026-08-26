@@ -602,6 +602,169 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should keep a queued restart on the old target after a later build fails", async () => {
+      vi.useFakeTimers();
+      const oldTarget: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-old",
+        outputPath: "./dist/old-app",
+        watchPaths: ["src/**/*.ts"],
+        autoRun: {
+          enabled: true,
+          command: "run-old",
+          args: ["--old"],
+          restartDelayMs: 1000,
+        },
+      };
+      const newTarget: ExecutableTarget = {
+        ...oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+      let buildActive = false;
+
+      (spawn as vi.Mock).mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          kill: vi.fn((signal: NodeJS.Signals) => {
+            child.emit("exit", 0, signal);
+            return true;
+          }),
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+        });
+        return child;
+      });
+
+      const runner = new ExecutableRunner(oldTarget, {
+        projectRoot: "/test/project",
+        logger: harness.logger,
+      });
+
+      try {
+        await runner.onBuildSuccess();
+        await runner.onBuildSuccess();
+
+        buildActive = true;
+        await runner.updateTarget(newTarget, {
+          defer: true,
+          isBuildActive: () => buildActive,
+        });
+        buildActive = false;
+        runner.onBuildFailure({
+          status: "failure",
+          timestamp: new Date().toISOString(),
+          errorSummary: "later build failed",
+        });
+
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(spawn).toHaveBeenCalledTimes(2);
+        expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+
+        await runner.onBuildSuccess();
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(spawn).toHaveBeenCalledTimes(3);
+        expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+      } finally {
+        await runner.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    test("should adopt a deferred target after an executing restart finishes", async () => {
+      const oldTarget: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-old",
+        outputPath: "./dist/old-app",
+        watchPaths: ["src/**/*.ts"],
+        autoRun: {
+          enabled: true,
+          command: "run-old",
+          args: ["--old"],
+          restartDelayMs: 0,
+        },
+      };
+      const newTarget: ExecutableTarget = {
+        ...oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...oldTarget.autoRun,
+          command: "run-new",
+          args: ["--new"],
+        },
+      };
+      let buildActive = false;
+      let releaseRestart: (() => void) | undefined;
+      let holdFirstStop = true;
+
+      (spawn as vi.Mock).mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          kill: vi.fn((signal: NodeJS.Signals) => {
+            if (holdFirstStop) {
+              holdFirstStop = false;
+              releaseRestart = () => child.emit("exit", 0, signal);
+            } else {
+              child.emit("exit", 0, signal);
+            }
+            return true;
+          }),
+          exitCode: null,
+          signalCode: null,
+          killed: false,
+        });
+        return child;
+      });
+
+      const runner = new ExecutableRunner(oldTarget, {
+        projectRoot: "/test/project",
+        logger: harness.logger,
+      });
+
+      try {
+        await runner.onBuildSuccess();
+        await runner.onBuildSuccess();
+        await vi.waitFor(() => expect(releaseRestart).toBeDefined());
+
+        buildActive = true;
+        await runner.updateTarget(newTarget, {
+          defer: true,
+          isBuildActive: () => buildActive,
+        });
+        buildActive = false;
+        runner.onBuildFailure({
+          status: "failure",
+          timestamp: new Date().toISOString(),
+          errorSummary: "later build failed",
+        });
+        releaseRestart?.();
+
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(2);
+          expect(spawn).toHaveBeenLastCalledWith("run-old", ["--old"], expect.any(Object));
+          expect((runner as unknown as { target: ExecutableTarget }).target).toBe(newTarget);
+        });
+
+        await runner.onBuildSuccess();
+        await vi.waitFor(() => {
+          expect(spawn).toHaveBeenCalledTimes(3);
+          expect(spawn).toHaveBeenLastCalledWith("run-new", ["--new"], expect.any(Object));
+        });
+      } finally {
+        releaseRestart?.();
+        await runner.stop();
+      }
+    });
+
     test("should keep the old auto-run command until every in-flight build finishes", async () => {
       const setup = await createAutoRunReloadHarness(false);
       const newTarget: ExecutableTarget = {

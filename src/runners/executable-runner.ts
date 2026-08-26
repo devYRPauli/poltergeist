@@ -14,6 +14,7 @@ export class ExecutableRunner {
   private pendingTarget?: ExecutableTarget;
   private isBuildActive?: () => boolean;
   private restartTimer: NodeJS.Timeout | null = null;
+  private restartInProgress = false;
   private restartSignal: NodeJS.Signals;
   private restartDelay: number;
   private args: string[];
@@ -76,13 +77,24 @@ export class ExecutableRunner {
     this.customCommand = cfg.command;
   }
 
+  /**
+   * The runner is quiescent when nothing is still tied to the OLD artifact: no build is
+   * running, no restart is queued, and no restart is executing. Adopting a reloaded target
+   * before that lets the old artifact launch or restart under the new command, arguments,
+   * environment or output path.
+   */
+  private isQuiescent(): boolean {
+    return (
+      !this.isBuildActive?.() &&
+      !this.pendingRestart &&
+      this.restartTimer === null &&
+      !this.restartInProgress
+    );
+  }
+
   private adoptPendingTarget(): void {
     if (!this.pendingTarget) return;
-    // A later build for the same target can still be running. BaseBuilder counts its
-    // builds and only adopts at zero; match that. Adopting after the first completion
-    // lets the second old-target build finish under the new command, arguments,
-    // environment or output path - the defect this deferral exists to prevent.
-    if (this.isBuildActive?.()) return;
+    if (!this.isQuiescent()) return;
     const target = this.pendingTarget;
     this.pendingTarget = undefined;
     this.applyTarget(target);
@@ -143,8 +155,14 @@ export class ExecutableRunner {
   private async performRestart(): Promise<void> {
     this.pendingRestart = false;
     this.restartTimer = null;
-    await this.stopChild(this.restartSignal);
-    await this.launch("rebuild");
+    this.restartInProgress = true;
+    try {
+      await this.stopChild(this.restartSignal);
+      await this.launch("rebuild");
+    } finally {
+      this.restartInProgress = false;
+      this.adoptPendingTarget();
+    }
   }
 
   private async launch(reason: string): Promise<void> {
