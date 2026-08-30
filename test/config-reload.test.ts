@@ -715,6 +715,57 @@ describe("Configuration Reloading", () => {
       }
     });
 
+    test("should adopt a deferred target when child exit cancels a queued restart", async () => {
+      vi.useFakeTimers();
+      const oldTarget: ExecutableTarget = {
+        name: "test-target",
+        type: "executable",
+        enabled: true,
+        buildCommand: "build-old",
+        outputPath: "./dist/old-app",
+        watchPaths: ["src/**/*.ts"],
+        autoRun: {
+          enabled: true,
+          command: "run-old",
+          restartDelayMs: 1000,
+        },
+      };
+      const newTarget: ExecutableTarget = {
+        ...oldTarget,
+        buildCommand: "build-new",
+        outputPath: "./dist/new-app",
+        autoRun: {
+          ...oldTarget.autoRun,
+          command: "run-new",
+        },
+      };
+      const child = Object.assign(new EventEmitter(), {
+        kill: vi.fn(),
+        exitCode: null,
+        signalCode: null,
+        killed: false,
+      });
+      (spawn as vi.Mock).mockReturnValue(child);
+
+      const runner = new ExecutableRunner(oldTarget, {
+        projectRoot: "/test/project",
+        logger: harness.logger,
+      });
+
+      try {
+        await runner.onBuildSuccess();
+        await runner.onBuildSuccess();
+        await runner.updateTarget(newTarget, { defer: true });
+
+        child.emit("exit", 0, null);
+
+        expect((runner as unknown as { target: ExecutableTarget }).target).toBe(newTarget);
+      } finally {
+        await runner.stop();
+        vi.useRealTimers();
+      }
+    });
+
     test("should adopt a deferred target after an executing restart finishes", async () => {
       const oldTarget: ExecutableTarget = {
         name: "test-target",

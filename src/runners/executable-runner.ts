@@ -195,6 +195,8 @@ export class ExecutableRunner {
               `[${this.target.name}] Auto-run process exited (${status}). Waiting for next successful build.`,
             );
           }
+          // A canceled queued restart makes the runner quiescent, so take the deferred target here too.
+          this.adoptPendingTarget();
         });
 
         this.child.on("error", (error: Error) => {
